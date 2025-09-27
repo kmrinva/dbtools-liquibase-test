@@ -140,8 +140,8 @@ jobs:
         run: |
           pwd
           ls -la
-          ls -la liquibase
-          ls -la liquibase/changesets
+          ls -la db
+          ls -la db/config
           
           # Check for liquibase.properties
           if [ -f "$LB_PROPERTIES" ]; then
