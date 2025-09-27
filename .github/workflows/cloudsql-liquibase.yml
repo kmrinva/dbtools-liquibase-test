@@ -22,7 +22,7 @@ jobs:
       CLOUDSQL_PASSWORD: ${{ secrets.CLOUDSQL_DEPLOY_PASSWORD }}
       GCP_SA_KEY: ${{ secrets.CLOUDSQL_SA_KEY }}
       # For private IP instances, set to 'true'
-      USE_PRIVATE_IP: true
+      USE_PRIVATE_IP: 'true'
       DRY_RUN_ENABLED: 'false'
       LB_TAG: run-${{ github.run_id }}-${{ github.run_attempt }}
       LB_DRIVER: org.postgresql.Driver
@@ -63,7 +63,7 @@ jobs:
 
       - name: Write service account key & set path
         run: |
-          printf '%s' '${CLOUDSQL_SA_KEY}' > "$RUNNER_TEMP/sa.json"
+          printf '%s' '$GCP_SA_KEY' > "$RUNNER_TEMP/sa.json"
           echo "SA_KEY_PATH=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
 
       - name: Start Cloud SQL Proxy (for private IP)
