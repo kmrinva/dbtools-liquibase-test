@@ -63,7 +63,7 @@ jobs:
 
       - name: Write service account key & set path
         run: |
-          printf '%s' '$GCP_SA_KEY' > "$RUNNER_TEMP/sa.json"
+          printf '%s' '${{ env.GCP_SA_KEY }}' > "$RUNNER_TEMP/sa.json"
           echo "SA_KEY_PATH=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
 
       - name: Start Cloud SQL Proxy (for private IP)
