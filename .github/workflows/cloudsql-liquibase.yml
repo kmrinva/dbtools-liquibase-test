@@ -70,7 +70,7 @@ jobs:
         if: env.USE_PRIVATE_IP == 'true'
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS="$SA_KEY_PATH"
-          $PROXY_PATH --port 5432 "${PROJECT_ID}:${CLOUDSQL_INSTANCE}" &
+          $PROXY_PATH --port 5432 --private-ip "${PROJECT_ID}:${CLOUDSQL_INSTANCE}" &
           echo "PROXY_PID=$!" >> "$GITHUB_ENV"
           
           # Wait for proxy to be ready
