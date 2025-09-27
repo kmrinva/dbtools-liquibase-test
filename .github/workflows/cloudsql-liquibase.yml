@@ -29,7 +29,7 @@ jobs:
       LB_CHANGELOG: db/changelog.xml
       LB_PROPERTIES: db/config/liquibase.properties
       LB_LOG_LEVEL: info
-
+      
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -102,10 +102,10 @@ jobs:
           # Build connection URL based on connection type
           if [ "$USE_PRIVATE_IP" == "true" ]; then
             # Connect through Cloud SQL Proxy
-            LB_URL="jdbc:postgresql://localhost:5432/${CLOUDSQL_DATABASE}?sslmode=disable"
+            LB_URL="jdbc:postgresql://localhost:5432/${CLOUDSQL_DATABASE}?sslmode=disable&connectTimeout=30&socketTimeout=30"
           else
             # Direct public IP connection
-            LB_URL="jdbc:postgresql://google/${CLOUDSQL_DATABASE}?cloudSqlInstance=${PROJECT_ID}:${CLOUDSQL_INSTANCE}&socketFactory=com.google.cloud.sql.postgres.SocketFactory&sslmode=disable"
+            LB_URL="jdbc:postgresql://google/${CLOUDSQL_DATABASE}?cloudSqlInstance=${PROJECT_ID}:${CLOUDSQL_INSTANCE}&socketFactory=com.google.cloud.sql.postgres.SocketFactory&sslmode=disable&connectTimeout=30&socketTimeout=30"
           fi
           
           echo "LB_URL=$LB_URL" >> "$GITHUB_ENV"
@@ -123,7 +123,7 @@ jobs:
           echo "Liquibase configuration ready"
 
       - name: Install Cloud SQL JDBC Socket Factory (for public IP)
-        if: env.USE_PRIVATE_IP != 'true'
+        if: env.USE_PRIVATE_IP == 'false'
         run: |
           curl -L -o lib/postgres-socket-factory-1.15.0.jar https://repo1.maven.org/maven2/com/google/cloud/sql/postgres-socket-factory/1.15.0/postgres-socket-factory-1.15.0.jar
           
@@ -136,12 +136,22 @@ jobs:
           # Set up service account authentication for socket factory
           export GOOGLE_APPLICATION_CREDENTIALS="$SA_KEY_PATH"
 
+      - name: Debug connection (test with psql)
+        if: env.USE_PRIVATE_IP == 'true'
+        run: |
+          # Install PostgreSQL client
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          
+          # Test basic connection
+          echo "Testing basic connection..."
+          PGPASSWORD="$CLOUDSQL_PASSWORD" psql -h localhost -p 5432 -U "$CLOUDSQL_USER" -d "$CLOUDSQL_DATABASE" -c "SELECT version();" || echo "Connection test failed"
+
       - name: Sanity check repo files
         run: |
           pwd
           ls -la
-          ls -la db
-          ls -la db/config
+          ls -la liquibase
+          ls -la liquibase/changesets
           
           # Check for liquibase.properties
           if [ -f "$LB_PROPERTIES" ]; then
