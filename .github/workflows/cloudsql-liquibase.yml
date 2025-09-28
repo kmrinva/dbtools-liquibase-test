@@ -43,6 +43,13 @@ jobs:
       - name: Prepare folders
         run: mkdir -p lib
 
+      - name: Test basic Google Cloud connectivity
+        run: |
+          echo "Testing basic GCP connectivity..."
+          export GOOGLE_APPLICATION_CREDENTIALS="$SA_KEY_PATH"
+          gcloud auth list
+          gcloud sql instances list --project=$PROJECT_ID
+      
       - name: Download Liquibase CLI
         run: |
           curl -L -o "$RUNNER_TEMP/liquibase.zip" https://github.com/liquibase/liquibase/releases/download/v4.29.2/liquibase-4.29.2.zip
