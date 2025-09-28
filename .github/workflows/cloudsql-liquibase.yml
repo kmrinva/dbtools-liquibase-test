@@ -61,10 +61,15 @@ jobs:
           chmod +x cloud-sql-proxy
           echo "PROXY_PATH=$PWD/cloud-sql-proxy" >> "$GITHUB_ENV"
 
-      - name: Write service account key & set path
-        run: |
-          printf '%s' '${{ env.GCP_SA_KEY }}' > "$RUNNER_TEMP/sa.json"
-          echo "SA_KEY_PATH=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+     - name: Write service account key & set path
+       run: |
+         echo '${{ env.GCP_SA_KEY }}' > "$RUNNER_TEMP/sa.json"
+         # Verify the JSON is valid
+         if ! jq empty "$RUNNER_TEMP/sa.json" 2>/dev/null; then
+           echo "Invalid JSON in service account key"
+           exit 1
+         fi
+         echo "SA_KEY_PATH=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
 
       - name: Start Cloud SQL Proxy (for private IP)
         if: env.USE_PRIVATE_IP == 'true'
@@ -73,19 +78,25 @@ jobs:
           $PROXY_PATH --port 5432 --private-ip "${PROJECT_ID}:${CLOUDSQL_INSTANCE}" --debug &
           echo "PROXY_PID=$!" >> "$GITHUB_ENV"
           
-          # Wait longer and check proxy logs
-          for i in {1..30}; do
+          # Wait for proxy with better error handling
+          for i in {1..60}; do  # Increased from 30
             if nc -z localhost 5432; then
               echo "Cloud SQL Proxy is ready"
-              break
+              # Test actual authentication
+              if PGPASSWORD="$CLOUDSQL_PASSWORD" timeout 10 psql -h localhost -p 5432 -U "$CLOUDSQL_USER" -d "$CLOUDSQL_DATABASE" -c "SELECT 1;" 2>/dev/null; then
+                echo "Database authentication successful"
+                break
+              else
+                echo "Proxy running but authentication failed, continuing to wait..."
+              fi
             fi
-            echo "Waiting for Cloud SQL Proxy... ($i/30)"
-            sleep 2
+            echo "Waiting for Cloud SQL Proxy... ($i/60)"
+            sleep 3  # Increased from 2
           done
           
-          # Give proxy time to stabilize
-          sleep 5
-
+          # Final verification
+          sleep 10  # Increased stabilization time
+      
       - name: Install Cloud SQL JDBC Socket Factory (for public IP)
         if: env.USE_PRIVATE_IP == 'false'
         run: |
@@ -132,7 +143,7 @@ jobs:
           # Test basic connection
           echo "Testing basic connection..."
           PGPASSWORD="$CLOUDSQL_PASSWORD" psql -h localhost -p 5432 -U "$CLOUDSQL_USER" -d "$CLOUDSQL_DATABASE" -c "SELECT version();" || echo "Connection test failed"
-          
+
       - name: Build classpath and Liquibase config
         id: classpath
         run: |
@@ -151,10 +162,10 @@ jobs:
           
           # Build connection URL based on connection type
           if [ "$USE_PRIVATE_IP" = "true" ]; then
-            LB_URL="jdbc:postgresql://localhost:5432/${CLOUDSQL_DATABASE}?sslmode=disable&connectTimeout=30&socketTimeout=30"
+            LB_URL="jdbc:postgresql://localhost:5432/${CLOUDSQL_DATABASE}?sslmode=disable&connectTimeout=60&socketTimeout=60&loginTimeout=60&tcpKeepAlive=true"
           else
-            LB_URL="jdbc:postgresql://google/${CLOUDSQL_DATABASE}?cloudSqlInstance=${PROJECT_ID}:${CLOUDSQL_INSTANCE}&socketFactory=com.google.cloud.sql.postgres.SocketFactory&sslmode=disable&connectTimeout=30&socketTimeout=30"
-          fi
+            LB_URL="jdbc:postgresql://google/${CLOUDSQL_DATABASE}?cloudSqlInstance=${PROJECT_ID}:${CLOUDSQL_INSTANCE}&socketFactory=com.google.cloud.sql.postgres.SocketFactory&sslmode=disable&connectTimeout=60&socketTimeout=60&tcpKeepAlive=true"
+          fi   
           echo "LB_URL=$LB_URL" >> "$GITHUB_ENV"
           
           # Build Liquibase command
