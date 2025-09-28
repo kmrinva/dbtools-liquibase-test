@@ -70,10 +70,10 @@ jobs:
         if: env.USE_PRIVATE_IP == 'true'
         run: |
           export GOOGLE_APPLICATION_CREDENTIALS="$SA_KEY_PATH"
-          $PROXY_PATH --port 5432 --private-ip "${PROJECT_ID}:${CLOUDSQL_INSTANCE}" &
+          $PROXY_PATH --port 5432 --private-ip "${PROJECT_ID}:${CLOUDSQL_INSTANCE}" --debug &
           echo "PROXY_PID=$!" >> "$GITHUB_ENV"
           
-          # Wait for proxy to be ready
+          # Wait longer and check proxy logs
           for i in {1..30}; do
             if nc -z localhost 5432; then
               echo "Cloud SQL Proxy is ready"
@@ -82,6 +82,9 @@ jobs:
             echo "Waiting for Cloud SQL Proxy... ($i/30)"
             sleep 2
           done
+          
+          # Give proxy time to stabilize
+          sleep 5
 
       - name: Install Cloud SQL JDBC Socket Factory (for public IP)
         if: env.USE_PRIVATE_IP == 'false'
@@ -120,7 +123,6 @@ jobs:
           # Set up service account authentication for socket factory
           export GOOGLE_APPLICATION_CREDENTIALS="$SA_KEY_PATH"      
       
-      
       - name: Debug connection (test with psql)
         if: env.USE_PRIVATE_IP == 'true'
         run: |
@@ -130,7 +132,7 @@ jobs:
           # Test basic connection
           echo "Testing basic connection..."
           PGPASSWORD="$CLOUDSQL_PASSWORD" psql -h localhost -p 5432 -U "$CLOUDSQL_USER" -d "$CLOUDSQL_DATABASE" -c "SELECT version();" || echo "Connection test failed"
-
+          
       - name: Build classpath and Liquibase config
         id: classpath
         run: |
