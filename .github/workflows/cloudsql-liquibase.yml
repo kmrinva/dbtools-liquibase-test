@@ -134,14 +134,14 @@ jobs:
           
           echo "LB_URL=$LB_URL" >> "$GITHUB_ENV"
           
-          # Build the Liquibase base command (⚠️ keep --password exactly like this)
+          # Build the Liquibase base command (⚠ keep --password exactly like this)
           if [ -f "$LB_PROPERTIES" ]; then
             LB_BASE_CMD="\"$LB\" --driver=\"$LB_DRIVER\" --classpath=\"$CLASSPATH\" --url=\"$LB_URL\" --username=\"$CLOUDSQL_USER\" --password=\"$CLOUDSQL_PASSWORD\" --changeLogFile=\"$LB_CHANGELOG\" --defaultsFile=\"$LB_PROPERTIES\" --log-level=\"$LB_LOG_LEVEL\""
           else
             LB_BASE_CMD="\"$LB\" --driver=\"$LB_DRIVER\" --classpath=\"$CLASSPATH\" --url=\"$LB_URL\" --username=\"$CLOUDSQL_USER\" --password=\"$CLOUDSQL_PASSWORD\" --changeLogFile=\"$LB_CHANGELOG\" --log-level=\"$LB_LOG_LEVEL\""
           fi
           
-          # Safe echo for debugging (don’t leak secret)
+          # Safe echo for debugging (mask only the value; leave the flag name intact)
           echo "LB_BASE_CMD=$(echo "$LB_BASE_CMD" | sed 's/--password=\"[^\"]*\"/--password=\"***\"/')" >> "$GITHUB_ENV"
           
           echo "Liquibase configuration ready"
@@ -161,6 +161,9 @@ jobs:
           else
             echo "No liquibase.properties file found"
           fi
+          
+          echo "LB_URL=$LB_URL"
+          echo "About to run: $(echo "$LB_BASE_CMD" | sed 's/--password=\"[^\"]*\"/--password=\"***\"/') validate"
 
       - name: Validate changelog
         id: validate
