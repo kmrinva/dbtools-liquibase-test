@@ -182,10 +182,8 @@ jobs:
             exit 1
           fi
           echo "LB_BASE_CMD=$(echo "$LB_BASE_CMD" | sed 's/--password=\"[^\"]*\"/--password=\"***\"/')" >> "$GITHUB_ENV"
-
           
           echo "Liquibase configuration ready"
-
 
       - name: Sanity check repo files
         run: |
