@@ -86,7 +86,7 @@ jobs:
       - name: Install Cloud SQL JDBC Socket Factory (for public IP)
         if: env.USE_PRIVATE_IP == 'false'
         run: |
-          curl -L -o lib/postgres-socket-factory-1.15.0.jar https://repo1.maven.org/maven2/com/google/cloud/sql/postgres-socket-factory/1.15.0/postgres-socket-factory-1.15.0.jar
+          curl -L -o lib/postgres-socket-factory-1.15.0-jar-with-dependencies.jar https://repo1.maven.org/maven2/com/google/cloud/sql/postgres-socket-factory/1.15.0/postgres-socket-factory-1.15.0-jar-with-dependencies.jar          
           
           # Update classpath to include socket factory
           shopt -s nullglob
