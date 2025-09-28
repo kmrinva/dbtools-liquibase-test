@@ -61,16 +61,16 @@ jobs:
           chmod +x cloud-sql-proxy
           echo "PROXY_PATH=$PWD/cloud-sql-proxy" >> "$GITHUB_ENV"
 
-     - name: Write service account key & set path
-       run: |
-         echo '${{ env.GCP_SA_KEY }}' > "$RUNNER_TEMP/sa.json"
-         # Verify the JSON is valid
-         if ! jq empty "$RUNNER_TEMP/sa.json" 2>/dev/null; then
-           echo "Invalid JSON in service account key"
-           exit 1
-         fi
-         echo "SA_KEY_PATH=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
-
+      - name: Write service account key & set path
+        run: |
+          echo '${{ env.GCP_SA_KEY }}' > "$RUNNER_TEMP/sa.json"
+          # Verify the JSON is valid
+          if ! jq empty "$RUNNER_TEMP/sa.json" 2>/dev/null; then
+            echo "Invalid JSON in service account key"
+            exit 1
+          fi
+          echo "SA_KEY_PATH=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+ 
       - name: Start Cloud SQL Proxy (for private IP)
         if: env.USE_PRIVATE_IP == 'true'
         run: |
