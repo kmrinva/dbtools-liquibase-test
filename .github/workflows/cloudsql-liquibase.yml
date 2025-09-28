@@ -86,8 +86,31 @@ jobs:
       - name: Install Cloud SQL JDBC Socket Factory (for public IP)
         if: env.USE_PRIVATE_IP == 'false'
         run: |
-          curl -L -o lib/postgres-socket-factory-1.15.0-jar-with-dependencies.jar https://repo1.maven.org/maven2/com/google/cloud/sql/postgres-socket-factory/1.15.0/postgres-socket-factory-1.15.0-jar-with-dependencies.jar          
-          
+          # Download with verification and retry
+          for i in {1..3}; do
+            echo "Download attempt $i/3"
+            if curl -L --fail -o lib/postgres-socket-factory-1.15.0-jar-with-dependencies.jar \
+              https://repo1.maven.org/maven2/com/google/cloud/sql/postgres-socket-factory/1.15.0/postgres-socket-factory-1.15.0-jar-with-dependencies.jar; then
+              
+              # Verify the JAR is valid
+              if jar tf lib/postgres-socket-factory-1.15.0-jar-with-dependencies.jar > /dev/null 2>&1; then
+                echo "JAR downloaded and verified successfully"
+                break
+              else
+                echo "JAR verification failed, retrying..."
+                rm -f lib/postgres-socket-factory-1.15.0-jar-with-dependencies.jar
+              fi
+            else
+              echo "Download failed, retrying..."
+            fi
+            
+            if [ $i -eq 3 ]; then
+              echo "Failed to download valid JAR after 3 attempts"
+              exit 1
+            fi
+            sleep 2
+          done
+      
           # Update classpath to include socket factory
           shopt -s nullglob
           jars=("$GITHUB_WORKSPACE"/lib/*.jar)
@@ -95,8 +118,9 @@ jobs:
           echo "CLASSPATH=$CLASSPATH" >> "$GITHUB_ENV"
           
           # Set up service account authentication for socket factory
-          export GOOGLE_APPLICATION_CREDENTIALS="$SA_KEY_PATH"
-
+          export GOOGLE_APPLICATION_CREDENTIALS="$SA_KEY_PATH"      
+      
+      
       - name: Debug connection (test with psql)
         if: env.USE_PRIVATE_IP == 'true'
         run: |
