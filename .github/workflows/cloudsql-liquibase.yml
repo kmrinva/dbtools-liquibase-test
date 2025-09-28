@@ -83,6 +83,30 @@ jobs:
             sleep 2
           done
 
+      - name: Install Cloud SQL JDBC Socket Factory (for public IP)
+        if: env.USE_PRIVATE_IP == 'false'
+        run: |
+          curl -L -o lib/postgres-socket-factory-1.15.0.jar https://repo1.maven.org/maven2/com/google/cloud/sql/postgres-socket-factory/1.15.0/postgres-socket-factory-1.15.0.jar
+          
+          # Update classpath to include socket factory
+          shopt -s nullglob
+          jars=("$GITHUB_WORKSPACE"/lib/*.jar)
+          CLASSPATH=$(IFS=:; echo "${jars[*]}")
+          echo "CLASSPATH=$CLASSPATH" >> "$GITHUB_ENV"
+          
+          # Set up service account authentication for socket factory
+          export GOOGLE_APPLICATION_CREDENTIALS="$SA_KEY_PATH"
+
+      - name: Debug connection (test with psql)
+        if: env.USE_PRIVATE_IP == 'true'
+        run: |
+          # Install PostgreSQL client
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          
+          # Test basic connection
+          echo "Testing basic connection..."
+          PGPASSWORD="$CLOUDSQL_PASSWORD" psql -h localhost -p 5432 -U "$CLOUDSQL_USER" -d "$CLOUDSQL_DATABASE" -c "SELECT version();" || echo "Connection test failed"
+
       - name: Build classpath and Liquibase config
         id: classpath
         run: |
@@ -122,29 +146,6 @@ jobs:
           
           echo "Liquibase configuration ready"
 
-      - name: Install Cloud SQL JDBC Socket Factory (for public IP)
-        if: env.USE_PRIVATE_IP == 'false'
-        run: |
-          curl -L -o lib/postgres-socket-factory-1.15.0.jar https://repo1.maven.org/maven2/com/google/cloud/sql/postgres-socket-factory/1.15.0/postgres-socket-factory-1.15.0.jar
-          
-          # Update classpath to include socket factory
-          shopt -s nullglob
-          jars=("$GITHUB_WORKSPACE"/lib/*.jar)
-          CLASSPATH=$(IFS=:; echo "${jars[*]}")
-          echo "CLASSPATH=$CLASSPATH" >> "$GITHUB_ENV"
-          
-          # Set up service account authentication for socket factory
-          export GOOGLE_APPLICATION_CREDENTIALS="$SA_KEY_PATH"
-
-      - name: Debug connection (test with psql)
-        if: env.USE_PRIVATE_IP == 'true'
-        run: |
-          # Install PostgreSQL client
-          sudo apt-get update && sudo apt-get install -y postgresql-client
-          
-          # Test basic connection
-          echo "Testing basic connection..."
-          PGPASSWORD="$CLOUDSQL_PASSWORD" psql -h localhost -p 5432 -U "$CLOUDSQL_USER" -d "$CLOUDSQL_DATABASE" -c "SELECT version();" || echo "Connection test failed"
 
       - name: Sanity check repo files
         run: |

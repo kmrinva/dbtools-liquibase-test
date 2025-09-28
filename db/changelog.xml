@@ -6,5 +6,5 @@
    http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.20.xsd">
 
 
-    <includeAll path="db/changesets/datastore/cloudsql" relativeToChangelogFile="true"/>
+    <includeAll path="changesets/datastore/cloudsql" relativeToChangelogFile="true"/>
 </databaseChangeLog>
