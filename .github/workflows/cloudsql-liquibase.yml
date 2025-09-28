@@ -123,26 +123,29 @@ jobs:
           echo "CLASSPATH=$CLASSPATH" >> "$GITHUB_ENV"
           echo "Using CLASSPATH: $CLASSPATH"
           
+          # Build connection URL based on connection type
           if [ "$USE_PRIVATE_IP" = "true" ]; then
-            # via Cloud SQL Proxy on 5432
             LB_URL="jdbc:postgresql://localhost:5432/${CLOUDSQL_DATABASE}?sslmode=disable&connectTimeout=30&socketTimeout=30"
           else
-          # Build connection URL based on connection type
-            # Direct (public) with Cloud SQL Postgres SocketFactory
             LB_URL="jdbc:postgresql://google/${CLOUDSQL_DATABASE}?cloudSqlInstance=${PROJECT_ID}:${CLOUDSQL_INSTANCE}&socketFactory=com.google.cloud.sql.postgres.SocketFactory&sslmode=disable&connectTimeout=30&socketTimeout=30"
           fi
-          
           echo "LB_URL=$LB_URL" >> "$GITHUB_ENV"
           
-          # Build the Liquibase base command (⚠ keep --password exactly like this)
+          # Build Liquibase command
           if [ -f "$LB_PROPERTIES" ]; then
             LB_BASE_CMD="\"$LB\" --driver=\"$LB_DRIVER\" --classpath=\"$CLASSPATH\" --url=\"$LB_URL\" --username=\"$CLOUDSQL_USER\" --password=\"$CLOUDSQL_PASSWORD\" --changeLogFile=\"$LB_CHANGELOG\" --defaultsFile=\"$LB_PROPERTIES\" --log-level=\"$LB_LOG_LEVEL\""
           else
             LB_BASE_CMD="\"$LB\" --driver=\"$LB_DRIVER\" --classpath=\"$CLASSPATH\" --url=\"$LB_URL\" --username=\"$CLOUDSQL_USER\" --password=\"$CLOUDSQL_PASSWORD\" --changeLogFile=\"$LB_CHANGELOG\" --log-level=\"$LB_LOG_LEVEL\""
           fi
           
-          # Safe echo for debugging (mask only the value; leave the flag name intact)
+          # Guard + sanitized echo
+          if ! echo "$LB_BASE_CMD" | grep -q -- '--password='; then
+            echo "FAILURE_STEP=Command assembly" >> "$GITHUB_ENV"
+            echo "FAILURE_DETAILS=Missing --password flag in LB_BASE_CMD" >> "$GITHUB_ENV"
+            exit 1
+          fi
           echo "LB_BASE_CMD=$(echo "$LB_BASE_CMD" | sed 's/--password=\"[^\"]*\"/--password=\"***\"/')" >> "$GITHUB_ENV"
+
           
           echo "Liquibase configuration ready"
 
