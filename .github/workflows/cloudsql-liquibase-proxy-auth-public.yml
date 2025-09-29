@@ -102,7 +102,19 @@ jobs:
       - name: Export Liquibase JDBC URL (localhost via proxy)
         run: |
           echo "LB_URL=jdbc:postgresql://127.0.0.1:5432/${CLOUDSQL_DATABASE}" >> "$GITHUB_ENV"
-          
+  
+      - name: Prepare JDBC driver (deterministic path)
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/lib"
+          # Pick the exact version you want; this one is common:
+          curl -fsSL -o "$GITHUB_WORKSPACE/lib/postgresql.jar" \
+            https://jdbc.postgresql.org/download/postgresql-42.7.3.jar
+          # Export an explicit classpath to a single file (no wildcard)
+          echo "LB_CLASSPATH=$GITHUB_WORKSPACE/lib/postgresql.jar" >> "$GITHUB_ENV"
+          # Sanity check
+          ls -l "$GITHUB_WORKSPACE/lib"
+        
       - name: Liquibase updateSQL (dry run)
         if: ${{ env.DRY_RUN_ENABLED == 'true' }}
         run: |
