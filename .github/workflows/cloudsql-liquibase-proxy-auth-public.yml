@@ -2,32 +2,25 @@ name: CloudSQL Liquibase via Proxy (Public IP)
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'db/changesets/datastore/cloudsql/**'
-      - '.github/workflows/cloudsql-liquibase.yml'
 
 permissions:
   contents: read
-  # id-token not required for key-based auth, but harmless if left out:
-  # id-token: write
 
 env:
   PROJECT_ID: autodeploydb
-  CLOUDSQL_INSTANCE: us-central1:poc-dbtools     # region:instance
+  CLOUDSQL_INSTANCE: us-central1:poc-dbtools          # region:instance
   CLOUDSQL_DATABASE: poc_liquibase
-  CLOUDSQL_USER: ${{ secrets.CLOUDSQL_DEPLOY_USER }}        # DB user (not IAM)
+  CLOUDSQL_USER: ${{ secrets.CLOUDSQL_DEPLOY_USER }}   # DB user (not IAM)
   CLOUDSQL_PASSWORD: ${{ secrets.CLOUDSQL_DEPLOY_PASSWORD }}
-  CLOUDSQL_SA_KEY: ${{ secrets.CLOUDSQL_SA_KEY }}           # SA JSON for GCP auth
-  USE_PRIVATE_IP: 'false'                                   # stay public for A2
+  CLOUDSQL_SA_KEY: ${{ secrets.CLOUDSQL_SA_KEY }}
+  USE_PRIVATE_IP: 'false'                              # A2 = public via proxy
   DRY_RUN_ENABLED: 'true'
   LB_TAG: run-${{ github.run_id }}-${{ github.run_attempt }}
   LB_DRIVER: org.postgresql.Driver
   LB_CHANGELOG: db/changelog.xml
   LB_PROPERTIES: db/config/liquibase.properties
   LB_LOG_LEVEL: info
-  # Versions you can bump as needed:
-  LB_VERSION: "4.33.0"      
+  LB_VERSION: "4.33.0"
   PG_JDBC_VERSION: "42.7.3"
   PROXY_VERSION: "2.11.3"
 
@@ -45,21 +38,22 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
-
+      # Auth first (writes ADC creds we will hand to the proxy)
       - name: Authenticate to GCP (SA JSON)
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ env.CLOUDSQL_SA_KEY }}
 
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
       - name: Configure gcloud project
         run: gcloud config set project "${PROJECT_ID}"
 
-      - name: Install prerequisites (psql, netcat, jq)
+      - name: Install prerequisites (psql + jq)
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y postgresql-client netcat jq
+          sudo apt-get install -y postgresql-client jq
 
       - name: Install Liquibase CLI
         run: |
@@ -85,14 +79,19 @@ jobs:
           curl -sSL -o cloud-sql-proxy \
             "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v${PROXY_VERSION}/cloud-sql-proxy.linux.amd64"
           chmod +x cloud-sql-proxy
-          # The auth action exposes GOOGLE_GHA_CREDS_PATH for the key file
           ./cloud-sql-proxy "$INSTANCE_CONN_NAME" \
             --port 5432 \
             --credentials-file="$GOOGLE_GHA_CREDS_PATH" \
             --quiet > proxy.log 2>&1 &
-          # Wait for the proxy socket to be ready
-          timeout 30 bash -c 'until nc -z 127.0.0.1 5432; do sleep 1; done'
-          echo "Proxy ready on 127.0.0.1:5432"
+          # Wait for the proxy socket to accept connections (no netcat needed)
+          for i in {1..30}; do
+            if pg_isready -h 127.0.0.1 -p 5432 -t 1 >/dev/null 2>&1; then
+              echo "Proxy is listening on 127.0.0.1:5432"
+              break
+            fi
+            sleep 1
+          done
+          pg_isready -h 127.0.0.1 -p 5432
 
       - name: Smoke-test DB connection (psql)
         run: |
@@ -143,4 +142,3 @@ jobs:
             --password="${CLOUDSQL_PASSWORD}" \
             --log-level="${LB_LOG_LEVEL}" \
             update
-
