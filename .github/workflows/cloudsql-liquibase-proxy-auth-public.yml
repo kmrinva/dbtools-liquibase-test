@@ -20,7 +20,7 @@ env:
   LB_CHANGELOG: db/changelog.xml
   LB_PROPERTIES: db/config/liquibase.properties
   LB_LOG_LEVEL: info
-  LB_VERSION: "4.33.0"
+  LB_VERSION: "4.29.2"
   PG_JDBC_VERSION: "42.7.3"
   PROXY_VERSION: "2.11.3"
 
@@ -63,7 +63,7 @@ jobs:
           tar -xzf liquibase.tar.gz -C "$HOME/liquibase" --strip-components=1
           echo "$HOME/liquibase" >> "$GITHUB_PATH"
           liquibase --version
-
+          
       - name: Get PostgreSQL JDBC driver
         run: |
           mkdir -p lib
