@@ -127,7 +127,7 @@ jobs:
           "${LB}" \
             ${EXTRA_DEFAULTS} \
             --driver="${LB_DRIVER}" \
-            --classpath="${CLASSPATH}" \
+            --classpath="${LB_CLASSPATH}" \
             --changeLogFile="${LB_CHANGELOG}" \
             --url="${LB_URL}" \
             --username="${CLOUDSQL_USER}" \
@@ -147,7 +147,7 @@ jobs:
           "${LB}" \
             ${EXTRA_DEFAULTS} \
             --driver="${LB_DRIVER}" \
-            --classpath="${CLASSPATH}" \
+            --classpath="${LB_CLASSPATH}" \
             --changeLogFile="${LB_CHANGELOG}" \
             --url="${LB_URL}" \
             --username="${CLOUDSQL_USER}" \
