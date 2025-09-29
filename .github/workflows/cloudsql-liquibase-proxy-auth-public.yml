@@ -102,7 +102,7 @@ jobs:
       - name: Export Liquibase JDBC URL (localhost via proxy)
         run: |
           echo "LB_URL=jdbc:postgresql://127.0.0.1:5432/${CLOUDSQL_DATABASE}" >> "$GITHUB_ENV"
-
+          
       - name: Liquibase updateSQL (dry run)
         if: ${{ env.DRY_RUN_ENABLED == 'true' }}
         run: |
@@ -112,7 +112,7 @@ jobs:
             echo "Using defaults file: ${LB_PROPERTIES}"
             EXTRA_DEFAULTS="--defaultsFile=${LB_PROPERTIES}"
           fi
-          "${LIQUIBASE_BIN}" \
+          "${LB}" \
             ${EXTRA_DEFAULTS} \
             --driver="${LB_DRIVER}" \
             --classpath="${CLASSPATH}" \
@@ -132,7 +132,7 @@ jobs:
             echo "Using defaults file: ${LB_PROPERTIES}"
             EXTRA_DEFAULTS="--defaultsFile=${LB_PROPERTIES}"
           fi
-          "${LIQUIBASE_BIN}" \
+          "${LB}" \
             ${EXTRA_DEFAULTS} \
             --driver="${LB_DRIVER}" \
             --classpath="${CLASSPATH}" \
