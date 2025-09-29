@@ -55,20 +55,15 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y postgresql-client jq
 
-      # Install Liquibase CLI and expose absolute path for later steps
-      - name: Install Liquibase CLI
+      - name: Download Liquibase CLI
         run: |
-          set -euo pipefail
-          curl -fsSL -o liquibase.tar.gz "https://github.com/liquibase/liquibase/releases/download/v${LB_VERSION}/liquibase-${LB_VERSION}.tar.gz"
-          mkdir -p "$HOME/liquibase"
-          tar -xzf liquibase.tar.gz -C "$HOME/liquibase" --strip-components=1
+          curl -L -o "$RUNNER_TEMP/liquibase.zip" https://github.com/liquibase/liquibase/releases/download/v4.29.2/liquibase-4.29.2.zip
+          unzip -q "$RUNNER_TEMP/liquibase.zip" -d "$HOME/liquibase"
           chmod +x "$HOME/liquibase/liquibase"
-          # Make it available to future steps both via PATH and an explicit var
-          echo "$HOME/liquibase" >> "$GITHUB_PATH"
-          echo "LIQUIBASE_BIN=$HOME/liquibase/liquibase" >> "$GITHUB_ENV"
+          echo "LB=$HOME/liquibase/liquibase" >> "$GITHUB_ENV"
           # Use the absolute path *in this step* (PATH not yet refreshed)
           "$HOME/liquibase/liquibase" --version
-          
+
       - name: Get PostgreSQL JDBC driver
         run: |
           mkdir -p lib
