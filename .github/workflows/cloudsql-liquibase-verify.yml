@@ -40,6 +40,47 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      # Parse-only check (what you already have)
+      - name: Verify GCP JSON secret (safe)
+        run: |
+          echo "$GOOGLE_CREDENTIALS" | jq 'keys'
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.CLOUDSQL_SA_KEY }}
+      
+      # Install gcloud CLI
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+      
+      # Authenticate to GCP using the SA JSON
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.CLOUDSQL_SA_KEY }}
+      
+      # Set project explicitly (so gcloud commands don’t guess)
+      - name: Configure gcloud project
+        run: |
+          gcloud config set project "${PROJECT_ID}"
+          gcloud config list
+        env:
+          PROJECT_ID: autodeploydb
+      
+      # Show who is actually active
+      - name: Who am I?
+        run: |
+          echo "Active account:"
+          gcloud config list account --format="value(core.account)" || true
+          echo "All accounts in this environment:"
+          gcloud auth list || true
+          echo "Token subject (should be your SA):"
+          gcloud auth print-identity-token | awk -F. '{print $2}' | base64 -d 2>/dev/null | jq -r '.email' || true
+      
+      # Optional: Cloud SQL sanity check (confirms IAM + project are right)
+      # Use the INSTANCE *name* (no region) for 'gcloud sql instances describe'
+      - name: Cloud SQL instance check
+        run: |
+          gcloud sql instances describe "poc-dbtools" --format="value(name,region,ipAddresses)"
+      
       - name: Prepare folders
         run: mkdir -p lib
 
