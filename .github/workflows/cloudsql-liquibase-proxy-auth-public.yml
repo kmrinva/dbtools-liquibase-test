@@ -1,4 +1,4 @@
-name: Liquibase to CloudSQL PostgreSQL with Script rollback
+name: CloudSQL Liquibase via Proxy (Public IP)
 
 on:
   workflow_dispatch:
@@ -9,27 +9,34 @@ on:
 
 permissions:
   contents: read
+  # id-token not required for key-based auth, but harmless if left out:
+  # id-token: write
+
+env:
+  PROJECT_ID: autodeploydb
+  CLOUDSQL_INSTANCE: us-central1:poc-dbtools     # region:instance
+  CLOUDSQL_DATABASE: poc_liquibase
+  CLOUDSQL_USER: ${{ secrets.CLOUDSQL_DEPLOY_USER }}        # DB user (not IAM)
+  CLOUDSQL_PASSWORD: ${{ secrets.CLOUDSQL_DEPLOY_PASSWORD }}
+  CLOUDSQL_SA_KEY: ${{ secrets.CLOUDSQL_SA_KEY }}           # SA JSON for GCP auth
+  USE_PRIVATE_IP: 'false'                                   # stay public for A2
+  DRY_RUN_ENABLED: 'true'
+  LB_TAG: run-${{ github.run_id }}-${{ github.run_attempt }}
+  LB_DRIVER: org.postgresql.Driver
+  LB_CHANGELOG: db/changelog.xml
+  LB_PROPERTIES: db/config/liquibase.properties
+  LB_LOG_LEVEL: info
+  # Versions you can bump as needed:
+  LB_VERSION: "4.33.0"      
+  LB_CHANGELOG: db/changelog.xml
+  LB_PROPERTIES: db/config/liquibase.properties
+  PG_JDBC_VERSION: "42.7.3"
+  PROXY_VERSION: "2.11.3"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
-    env:
-      PROJECT_ID: autodeploydb
-      CLOUDSQL_INSTANCE: us-central1:poc-dbtools
-      CLOUDSQL_DATABASE: poc_liquibase
-      CLOUDSQL_USER: ${{ secrets.CLOUDSQL_DEPLOY_USER }}
-      CLOUDSQL_PASSWORD: ${{ secrets.CLOUDSQL_DEPLOY_PASSWORD }}
-      GCP_SA_KEY: ${{ secrets.CLOUDSQL_SA_KEY }}
-      # For private IP instances, set to 'true'
-      USE_PRIVATE_IP: 'true'
-      DRY_RUN_ENABLED: 'true'
-      LB_TAG: run-${{ github.run_id }}-${{ github.run_attempt }}
-      LB_DRIVER: org.postgresql.Driver
-      LB_CHANGELOG: db/changelog.xml
-      LB_PROPERTIES: db/config/liquibase.properties
-      LB_LOG_LEVEL: info    
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,75 +53,96 @@ jobs:
       - name: Authenticate to GCP (SA JSON)
         uses: google-github-actions/auth@v2
         with:
-          # Your SA JSON key in GitHub Secrets
-          credentials_json: ${{ secrets.CLOUDSQL_SA_KEY }}
+          credentials_json: ${{ env.CLOUDSQL_SA_KEY }}
 
       - name: Configure gcloud project
         run: gcloud config set project "${PROJECT_ID}"
 
-      # --- Start Cloud SQL Auth Proxy (PUBLIC IP path) ---
-      - name: Start Cloud SQL Auth Proxy v2
+      - name: Install prerequisites (psql, netcat, jq)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql-client netcat jq
+
+      - name: Install Liquibase CLI
+        run: |
+          set -euo pipefail
+          curl -L -o liquibase.tar.gz "https://github.com/liquibase/liquibase/releases/download/v${LB_VERSION}/liquibase-${LB_VERSION}.tar.gz"
+          mkdir -p "$HOME/liquibase"
+          tar -xzf liquibase.tar.gz -C "$HOME/liquibase" --strip-components=1
+          echo "$HOME/liquibase" >> "$GITHUB_PATH"
+          liquibase --version
+
+      - name: Get PostgreSQL JDBC driver
+        run: |
+          mkdir -p lib
+          curl -L -o "lib/postgresql-${PG_JDBC_VERSION}.jar" "https://jdbc.postgresql.org/download/postgresql-${PG_JDBC_VERSION}.jar"
+          echo "CLASSPATH=$GITHUB_WORKSPACE/lib/*" >> "$GITHUB_ENV"
+
+      # ---- Cloud SQL Auth Proxy (PUBLIC IP path) ----
+      - name: Start Cloud SQL Auth Proxy v2 (public)
         env:
           INSTANCE_CONN_NAME: ${{ env.PROJECT_ID }}:${{ env.CLOUDSQL_INSTANCE }}
         run: |
           set -euo pipefail
           curl -sSL -o cloud-sql-proxy \
-            https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.11.3/cloud-sql-proxy.linux.amd64
+            "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v${PROXY_VERSION}/cloud-sql-proxy.linux.amd64"
           chmod +x cloud-sql-proxy
-          # Use the credentials file that auth@v2 wrote for us
-          # $GOOGLE_GHA_CREDS_PATH is set by the auth action
+          # The auth action exposes GOOGLE_GHA_CREDS_PATH for the key file
           ./cloud-sql-proxy "$INSTANCE_CONN_NAME" \
             --port 5432 \
             --credentials-file="$GOOGLE_GHA_CREDS_PATH" \
             --quiet > proxy.log 2>&1 &
-          # Wait until the proxy is listening
+          # Wait for the proxy socket to be ready
           timeout 30 bash -c 'until nc -z 127.0.0.1 5432; do sleep 1; done'
-          echo "Proxy is listening on 127.0.0.1:5432"
-          
-      - name: Download Liquibase CLI
-        run: |
-          curl -L -o "$RUNNER_TEMP/liquibase.zip" https://github.com/liquibase/liquibase/releases/download/v4.29.2/liquibase-4.29.2.zip
-          unzip -q "$RUNNER_TEMP/liquibase.zip" -d "$HOME/liquibase"
-          chmod +x "$HOME/liquibase/liquibase"
-          echo "LB=$HOME/liquibase/liquibase" >> "$GITHUB_ENV"
+          echo "Proxy ready on 127.0.0.1:5432"
 
-      # Optional: quick DB connectivity smoke-test (PostgreSQL)
-      - name: Install psql client and verify connection
+      - name: Smoke-test DB connection (psql)
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y postgresql-client
           PGPASSWORD="${CLOUDSQL_PASSWORD}" psql \
             "host=127.0.0.1 port=5432 dbname=${CLOUDSQL_DATABASE} user=${CLOUDSQL_USER} sslmode=disable" \
-            -c "SELECT current_database() as db, current_user as user, version() as version;"
+            -c "SELECT current_database() AS db, current_user AS usr, version() AS ver;"
 
-      # Export JDBC URL for Liquibase (localhost via proxy)
-      - name: Build Liquibase JDBC URL (localhost)
+      - name: Export Liquibase JDBC URL (localhost via proxy)
         run: |
           echo "LB_URL=jdbc:postgresql://127.0.0.1:5432/${CLOUDSQL_DATABASE}" >> "$GITHUB_ENV"
-          echo "LB_DRIVER=org.postgresql.Driver" >> "$GITHUB_ENV"
 
-      # Example Liquibase dry-run (uses your env + LB_URL)
-      # Replace with your actual Liquibase invocation if different.
       - name: Liquibase updateSQL (dry run)
-        if: env.DRY_RUN_ENABLED == 'true'
+        if: ${{ env.DRY_RUN_ENABLED == 'true' }}
         run: |
+          set -euo pipefail
+          EXTRA_DEFAULTS=""
+          if [ -f "${LB_PROPERTIES}" ]; then
+            echo "Using defaults file: ${LB_PROPERTIES}"
+            EXTRA_DEFAULTS="--defaultsFile=${LB_PROPERTIES}"
+          fi
           liquibase \
+            ${EXTRA_DEFAULTS} \
             --driver="${LB_DRIVER}" \
+            --classpath="${CLASSPATH}" \
+            --changeLogFile="${LB_CHANGELOG}" \
             --url="${LB_URL}" \
             --username="${CLOUDSQL_USER}" \
             --password="${CLOUDSQL_PASSWORD}" \
-            --changeLogFile="db/changelog.xml" \
-            --log-level=info \
+            --log-level="${LB_LOG_LEVEL}" \
             updateSQL
 
       - name: Liquibase update (real)
-        if: env.DRY_RUN_ENABLED != 'true'
+        if: ${{ env.DRY_RUN_ENABLED != 'true' }}
         run: |
+          set -euo pipefail
+          EXTRA_DEFAULTS=""
+          if [ -f "${LB_PROPERTIES}" ]; then
+            echo "Using defaults file: ${LB_PROPERTIES}"
+            EXTRA_DEFAULTS="--defaultsFile=${LB_PROPERTIES}"
+          fi
           liquibase \
+            ${EXTRA_DEFAULTS} \
             --driver="${LB_DRIVER}" \
+            --classpath="${CLASSPATH}" \
+            --changeLogFile="${LB_CHANGELOG}" \
             --url="${LB_URL}" \
             --username="${CLOUDSQL_USER}" \
             --password="${CLOUDSQL_PASSWORD}" \
-            --changeLogFile="db/changelog.xml" \
-            --log-level=info \
+            --log-level="${LB_LOG_LEVEL}" \
             update
+
