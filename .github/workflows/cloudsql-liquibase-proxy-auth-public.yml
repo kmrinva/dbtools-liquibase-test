@@ -70,6 +70,13 @@ jobs:
           # Wait until the proxy is listening
           timeout 30 bash -c 'until nc -z 127.0.0.1 5432; do sleep 1; done'
           echo "Proxy is listening on 127.0.0.1:5432"
+          
+      - name: Download Liquibase CLI
+        run: |
+          curl -L -o "$RUNNER_TEMP/liquibase.zip" https://github.com/liquibase/liquibase/releases/download/v4.29.2/liquibase-4.29.2.zip
+          unzip -q "$RUNNER_TEMP/liquibase.zip" -d "$HOME/liquibase"
+          chmod +x "$HOME/liquibase/liquibase"
+          echo "LB=$HOME/liquibase/liquibase" >> "$GITHUB_ENV"
 
       # Optional: quick DB connectivity smoke-test (PostgreSQL)
       - name: Install psql client and verify connection
