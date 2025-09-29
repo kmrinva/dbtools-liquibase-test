@@ -28,8 +28,6 @@ env:
   LB_LOG_LEVEL: info
   # Versions you can bump as needed:
   LB_VERSION: "4.33.0"      
-  LB_CHANGELOG: db/changelog.xml
-  LB_PROPERTIES: db/config/liquibase.properties
   PG_JDBC_VERSION: "42.7.3"
   PROXY_VERSION: "2.11.3"
 
