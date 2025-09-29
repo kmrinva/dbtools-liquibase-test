@@ -14,7 +14,7 @@ env:
   CLOUDSQL_PASSWORD: ${{ secrets.CLOUDSQL_DEPLOY_PASSWORD }}
   CLOUDSQL_SA_KEY: ${{ secrets.CLOUDSQL_SA_KEY }}
   USE_PRIVATE_IP: 'false'                              # A2 = public via proxy
-  DRY_RUN_ENABLED: 'true'
+  DRY_RUN_ENABLED: 'false'
   LB_TAG: run-${{ github.run_id }}-${{ github.run_attempt }}
   LB_DRIVER: org.postgresql.Driver
   LB_CHANGELOG: db/changelog.xml
