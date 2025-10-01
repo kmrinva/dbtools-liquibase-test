@@ -1,0 +1,466 @@
+name: CloudSQL Liquibase Deployment with Auto-Rollback
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'db/**'
+      - '.github/workflows/cloudsql-liquibase-deploy.yml'
+
+permissions:
+  contents: read
+
+env:
+  PROJECT_ID: autodeploydb
+  CLOUDSQL_INSTANCE: us-central1:poc-dbtools
+  CLOUDSQL_DATABASE: poc_liquibase
+  CLOUDSQL_USER: ${{ secrets.CLOUDSQL_DEPLOY_USER }}
+  CLOUDSQL_PASSWORD: ${{ secrets.CLOUDSQL_DEPLOY_PASSWORD }}
+  CLOUDSQL_SA_KEY: ${{ secrets.CLOUDSQL_SA_KEY }}
+  DRY_RUN_ENABLED: 'false'
+  LB_TAG: run-${{ github.run_id }}-${{ github.run_attempt }}
+  LB_DRIVER: org.postgresql.Driver
+  LB_CHANGELOG: db/changelog.xml
+  LB_PROPERTIES: db/config/liquibase.properties
+  LB_LOG_LEVEL: info
+  LB_VERSION: "4.29.2"
+  PG_JDBC_VERSION: "42.7.3"
+  PROXY_VERSION: "2.11.3"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Authenticate to GCP (SA JSON)
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ env.CLOUDSQL_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure gcloud project
+        run: gcloud config set project "${PROJECT_ID}"
+
+      - name: Install prerequisites (psql + jq)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql-client jq
+
+      - name: Download Liquibase CLI
+        run: |
+          curl -L -o "$RUNNER_TEMP/liquibase.zip" https://github.com/liquibase/liquibase/releases/download/v${{ env.LB_VERSION }}/liquibase-${{ env.LB_VERSION }}.zip
+          unzip -q "$RUNNER_TEMP/liquibase.zip" -d "$HOME/liquibase"
+          chmod +x "$HOME/liquibase/liquibase"
+          echo "LB=$HOME/liquibase/liquibase" >> "$GITHUB_ENV"
+          "$HOME/liquibase/liquibase" --version
+
+      - name: Get PostgreSQL JDBC driver
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/lib"
+          curl -fsSL -o "$GITHUB_WORKSPACE/lib/postgresql.jar" \
+            "https://jdbc.postgresql.org/download/postgresql-${{ env.PG_JDBC_VERSION }}.jar"
+          echo "LB_CLASSPATH=$GITHUB_WORKSPACE/lib/postgresql.jar" >> "$GITHUB_ENV"
+          ls -l "$GITHUB_WORKSPACE/lib"
+
+      - name: Start Cloud SQL Auth Proxy v2 (public)
+        env:
+          INSTANCE_CONN_NAME: ${{ env.PROJECT_ID }}:${{ env.CLOUDSQL_INSTANCE }}
+        run: |
+          set -euo pipefail
+          curl -sSL -o cloud-sql-proxy \
+            "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v${{ env.PROXY_VERSION }}/cloud-sql-proxy.linux.amd64"
+          chmod +x cloud-sql-proxy
+          ./cloud-sql-proxy "$INSTANCE_CONN_NAME" \
+            --port 5432 \
+            --credentials-file="$GOOGLE_GHA_CREDS_PATH" \
+            --quiet > proxy.log 2>&1 &
+          
+          for i in {1..30}; do
+            if pg_isready -h 127.0.0.1 -p 5432 -t 1 >/dev/null 2>&1; then
+              echo "Proxy is listening on 127.0.0.1:5432"
+              break
+            fi
+            sleep 1
+          done
+          pg_isready -h 127.0.0.1 -p 5432
+
+      - name: Smoke-test DB connection (psql)
+        run: |
+          PGPASSWORD="${CLOUDSQL_PASSWORD}" psql \
+            "host=127.0.0.1 port=5432 dbname=${CLOUDSQL_DATABASE} user=${CLOUDSQL_USER} sslmode=disable" \
+            -c "SELECT current_database() AS db, current_user AS usr, version() AS ver;"
+
+      - name: Export Liquibase JDBC URL
+        run: |
+          echo "LB_URL=jdbc:postgresql://127.0.0.1:5432/${CLOUDSQL_DATABASE}" >> "$GITHUB_ENV"
+
+      - name: Build Liquibase base command
+        id: build_command
+        run: |
+          set -euo pipefail
+          EXTRA_DEFAULTS=""
+          if [ -f "${LB_PROPERTIES}" ]; then
+            echo "Using defaults file: ${LB_PROPERTIES}"
+            EXTRA_DEFAULTS="--defaultsFile=${LB_PROPERTIES}"
+          fi
+          
+          LB_BASE_CMD="\"$LB\" ${EXTRA_DEFAULTS} --driver=\"$LB_DRIVER\" --classpath=\"$LB_CLASSPATH\" --changeLogFile=\"$LB_CHANGELOG\" --url=\"$LB_URL\" --username=\"$CLOUDSQL_USER\" --password=\"$CLOUDSQL_PASSWORD\" --log-level=\"$LB_LOG_LEVEL\""
+          echo "LB_BASE_CMD=$LB_BASE_CMD" >> "$GITHUB_ENV"
+          echo "Liquibase configuration ready"
+
+      - name: Sanity check repo files
+        run: |
+          pwd
+          ls -la
+          if [ -d "db" ]; then
+            ls -la db/
+            if [ -d "db/changesets" ]; then
+              ls -la db/changesets/
+            fi
+          fi
+
+      - name: Validate changelog
+        id: validate
+        run: |
+          VALIDATE_LOG="validate.log"
+          set +e
+          eval "$LB_BASE_CMD validate" > "$VALIDATE_LOG" 2>&1
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "FAILURE_STEP=Changelog validation" >> "$GITHUB_ENV"
+            echo "FAILURE_DETAILS=Changelog XML validation failed - check syntax and structure" >> "$GITHUB_ENV"
+            echo "FULL_ERROR_OUTPUT<<EOF" >> "$GITHUB_ENV"
+            cat "$VALIDATE_LOG" >> "$GITHUB_ENV"
+            echo "EOF" >> "$GITHUB_ENV"
+            exit 1
+          fi
+          
+          echo "Changelog validation passed"
+
+      - name: Check pending changes
+        id: pending_changes
+        run: |
+          set -euo pipefail
+          STATUS_LOG="status.log"
+          
+          set +e
+          eval "$LB_BASE_CMD status" > "$STATUS_LOG" 2>&1
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "FAILURE_STEP=Database connection check" >> "$GITHUB_ENV"
+            echo "FAILURE_DETAILS=Unable to connect to CloudSQL or retrieve status" >> "$GITHUB_ENV"
+            echo "ERROR_OUTPUT<<EOF" >> "$GITHUB_ENV"
+            cat "$STATUS_LOG" >> "$GITHUB_ENV"
+            echo "EOF" >> "$GITHUB_ENV"
+            exit 1
+          fi
+          
+          echo "Status output:"
+          cat "$STATUS_LOG"
+          
+          if grep -qE "changeset(s)? (has|have) not been applied" "$STATUS_LOG"; then
+            echo "has_pending_changes=true" >> "$GITHUB_OUTPUT"
+            echo "Pending changes detected"
+          else
+            echo "has_pending_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No pending changes"
+          fi
+
+      - name: Dry run (updateSQL)
+        if: env.DRY_RUN_ENABLED == 'true' && steps.pending_changes.outputs.has_pending_changes == 'true'
+        run: |
+          UPDATESQL_LOG="updatesql.log"
+          OUTPUT_FILE="liquibase_update_${LB_TAG}.sql"
+          
+          set +e
+          eval "$LB_BASE_CMD --output-file=\"$OUTPUT_FILE\" updateSQL" > "$UPDATESQL_LOG" 2>&1
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "FAILURE_STEP=Dry run SQL generation" >> "$GITHUB_ENV"
+            echo "FAILURE_DETAILS=updateSQL command failed - check changesets for SQL syntax errors" >> "$GITHUB_ENV"
+            echo "FULL_ERROR_OUTPUT<<EOF" >> "$GITHUB_ENV"
+            cat "$UPDATESQL_LOG" >> "$GITHUB_ENV"
+            echo "EOF" >> "$GITHUB_ENV"
+            exit 1
+          fi
+          
+          echo "UpdateSQL generated successfully"
+          if [ -f "$OUTPUT_FILE" ]; then
+            echo "Preview of generated SQL:"
+            head -20 "$OUTPUT_FILE"
+          fi
+
+      - name: Upload updateSQL artifact
+        if: env.DRY_RUN_ENABLED == 'true' && steps.pending_changes.outputs.has_pending_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: "updateSQL-${{ env.LB_TAG }}"
+          path: "**/liquibase_update_*.sql"
+          retention-days: 30
+
+      - name: Tag pre-deploy state
+        id: tag_predeploy
+        if: env.DRY_RUN_ENABLED != 'true' && steps.pending_changes.outputs.has_pending_changes == 'true'
+        run: |
+          TAG_LOG="tag.log"
+          
+          set +e
+          eval "$LB_BASE_CMD tag \"${LB_TAG}\"" > "$TAG_LOG" 2>&1
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "FAILURE_STEP=Pre-deployment tagging" >> "$GITHUB_ENV"
+            echo "FAILURE_DETAILS=Failed to create rollback tag ${LB_TAG}" >> "$GITHUB_ENV"
+            echo "FULL_ERROR_OUTPUT<<EOF" >> "$GITHUB_ENV"
+            cat "$TAG_LOG" >> "$GITHUB_ENV"
+            echo "EOF" >> "$GITHUB_ENV"
+            exit 1
+          fi
+          
+          echo "tagged=true" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$LB_TAG" >> "$GITHUB_OUTPUT"
+          echo "Pre-deployment tag created: ${LB_TAG}"
+
+      - name: Update (apply pending changes)
+        id: lb_update
+        if: env.DRY_RUN_ENABLED != 'true' && steps.pending_changes.outputs.has_pending_changes == 'true'
+        run: |
+          UPDATE_LOG="update.log"
+          
+          echo "Applying pending changesets..."
+          
+          set +e
+          eval "$LB_BASE_CMD update" > "$UPDATE_LOG" 2>&1
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "Update failed - capturing failure details..."
+            
+            # Extract failing changeset information
+            FAILING_CHANGESET=$(grep -oE "changeset.*failed" "$UPDATE_LOG" | head -1 || echo "Unknown changeset")
+            FAILING_SQL=$(grep -A 10 -B 5 "ERROR\|Exception\|Failed" "$UPDATE_LOG" | head -20 || echo "SQL error details not captured")
+            
+            echo "FAILURE_STEP=Liquibase update execution" >> "$GITHUB_ENV"
+            echo "FAILURE_DETAILS=Failed at: $FAILING_CHANGESET" >> "$GITHUB_ENV"
+            echo "FAILING_SQL<<EOF" >> "$GITHUB_ENV"
+            echo "$FAILING_SQL" >> "$GITHUB_ENV"
+            echo "EOF" >> "$GITHUB_ENV"
+            echo "FULL_ERROR_OUTPUT<<EOF" >> "$GITHUB_ENV"
+            cat "$UPDATE_LOG" >> "$GITHUB_ENV"
+            echo "EOF" >> "$GITHUB_ENV"
+            
+            echo "Executing immediate rollback to ${LB_TAG}"
+            
+            ROLLBACK_LOG="emergency_rollback.log"
+            set +e
+            eval "$LB_BASE_CMD rollback \"${LB_TAG}\"" > "$ROLLBACK_LOG" 2>&1
+            ROLLBACK_EXIT=$?
+            set -e
+            
+            if [ $ROLLBACK_EXIT -ne 0 ]; then
+                echo "FAILURE_STEP=Critical: Rollback failed after update failure" >> "$GITHUB_ENV"
+                echo "FAILURE_DETAILS=Database may be in inconsistent state. Manual intervention required." >> "$GITHUB_ENV"
+                echo "ROLLBACK_ERROR<<EOF" >> "$GITHUB_ENV"
+                cat "$ROLLBACK_LOG" >> "$GITHUB_ENV"
+                echo "EOF" >> "$GITHUB_ENV"
+                exit 1
+            fi
+            
+            echo "Rollback completed successfully"
+            echo "ROLLBACK_SUCCESS=true" >> "$GITHUB_ENV"
+            exit 1
+          fi
+          
+          echo "All changesets applied successfully"
+          cat "$UPDATE_LOG"
+
+      - name: Post-deploy verification
+        if: steps.lb_update.outcome == 'success'
+        run: |
+          echo "Verifying deployment..."
+          
+          VERIFY_LOG="verify.log"
+          
+          set +e
+          eval "$LB_BASE_CMD status --verbose" > "$VERIFY_LOG" 2>&1
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "FAILURE_STEP=Post-deployment verification" >> "$GITHUB_ENV"
+            echo "FAILURE_DETAILS=Deployment succeeded but verification failed" >> "$GITHUB_ENV"
+            echo "FULL_ERROR_OUTPUT<<EOF" >> "$GITHUB_ENV"
+            cat "$VERIFY_LOG" >> "$GITHUB_ENV"
+            echo "EOF" >> "$GITHUB_ENV"
+            exit 1
+          fi
+          
+          echo "Deployment verification completed successfully"
+          cat "$VERIFY_LOG"
+          
+          # Additional database connectivity check
+          echo ""
+          echo "Database connectivity check:"
+          PGPASSWORD="${CLOUDSQL_PASSWORD}" psql \
+            "host=127.0.0.1 port=5432 dbname=${CLOUDSQL_DATABASE} user=${CLOUDSQL_USER} sslmode=disable" \
+            -c "SELECT schemaname, COUNT(*) as table_count FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') GROUP BY schemaname;"
+
+      - name: Rollback on workflow failure (safety net)
+        if: failure() && steps.tag_predeploy.outputs.tagged == 'true' && steps.lb_update.outcome != 'failure' && env.ROLLBACK_SUCCESS != 'true'
+        run: |
+          echo "Workflow failed outside of update step - executing safety rollback"
+          echo "Rolling back to tag: ${{ steps.tag_predeploy.outputs.tag_name }}"
+          
+          SAFETY_ROLLBACK_LOG="safety_rollback.log"
+          
+          set +e
+          eval "$LB_BASE_CMD rollback \"${{ steps.tag_predeploy.outputs.tag_name }}\"" > "$SAFETY_ROLLBACK_LOG" 2>&1
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+              echo "FAILURE_STEP=Safety net rollback failure" >> "$GITHUB_ENV"
+              echo "FAILURE_DETAILS=Manual intervention required - rollback failed" >> "$GITHUB_ENV"
+              echo "SAFETY_ROLLBACK_ERROR<<EOF" >> "$GITHUB_ENV"
+              cat "$SAFETY_ROLLBACK_LOG" >> "$GITHUB_ENV"
+              echo "EOF" >> "$GITHUB_ENV"
+              exit 1
+          fi
+          
+          echo "Safety net rollback completed"
+          cat "$SAFETY_ROLLBACK_LOG"
+
+      - name: Release Liquibase locks
+        if: always()
+        run: |
+          eval "$LB_BASE_CMD releaseLocks" || echo "Failed to release locks (may not exist)"
+
+      - name: Stop Cloud SQL Proxy
+        if: always()
+        run: |
+          pkill -f cloud-sql-proxy || echo "Proxy already stopped"
+          if [ -f proxy.log ]; then
+            echo "Proxy logs:"
+            cat proxy.log
+          fi
+
+      - name: Final status check
+        if: always()
+        run: |
+          echo "Final database status:"
+          FINAL_STATUS_LOG="final_status.log"
+          eval "$LB_BASE_CMD status --verbose" > "$FINAL_STATUS_LOG" 2>&1 || echo "Status check failed"
+          cat "$FINAL_STATUS_LOG" || true
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag**: ${{ env.LB_TAG }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **CloudSQL Instance**: ${{ env.PROJECT_ID }}:${{ env.CLOUDSQL_INSTANCE }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Database**: ${{ env.CLOUDSQL_DATABASE }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Pending Changes**: ${{ steps.pending_changes.outputs.has_pending_changes }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tagged for Rollback**: ${{ steps.tag_predeploy.outputs.tagged }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Update Status**: ${{ steps.lb_update.outcome }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dry Run Mode**: ${{ env.DRY_RUN_ENABLED }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -n "${FAILURE_STEP:-}" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## Deployment Failed" >> $GITHUB_STEP_SUMMARY
+            echo "- **Failed Step**: ${{ env.FAILURE_STEP }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Failure Details**: ${{ env.FAILURE_DETAILS }}" >> $GITHUB_STEP_SUMMARY
+            
+            if [ -n "${FAILING_SQL:-}" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Failing SQL Context:" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "${{ env.FAILING_SQL }}" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            if [ -n "${FULL_ERROR_OUTPUT:-}" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Complete Error Output:" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "${{ env.FULL_ERROR_OUTPUT }}" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            if [ -n "${ROLLBACK_ERROR:-}" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### CRITICAL - Rollback Failed:" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "${{ env.ROLLBACK_ERROR }}" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "**MANUAL INTERVENTION REQUIRED**" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "#### Emergency Recovery Steps:" >> $GITHUB_STEP_SUMMARY
+              echo "1. Connect to CloudSQL: \`gcloud sql connect poc-dbtools --user=${{ env.CLOUDSQL_USER }} --database=${{ env.CLOUDSQL_DATABASE }}\`" >> $GITHUB_STEP_SUMMARY
+              echo "2. Check DATABASECHANGELOG table for state" >> $GITHUB_STEP_SUMMARY
+              echo "3. Manually rollback using tag: ${{ steps.tag_predeploy.outputs.tag_name }}" >> $GITHUB_STEP_SUMMARY
+              echo "4. Review proxy logs and CloudSQL logs in GCP Console" >> $GITHUB_STEP_SUMMARY
+            elif [ "${{ env.ROLLBACK_SUCCESS }}" == "true" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Automatic Rollback Executed" >> $GITHUB_STEP_SUMMARY
+              echo "Deployment failed but was automatically rolled back to tag: ${{ steps.tag_predeploy.outputs.tag_name }}" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            if [ -n "${SAFETY_ROLLBACK_ERROR:-}" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### CRITICAL - Safety Rollback Failed:" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "${{ env.SAFETY_ROLLBACK_ERROR }}" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Troubleshooting Tips:" >> $GITHUB_STEP_SUMMARY
+            echo "1. Check if the schema \`poc_app_dw\` exists in CloudSQL" >> $GITHUB_STEP_SUMMARY
+            echo "2. Verify service account has Cloud SQL Client role" >> $GITHUB_STEP_SUMMARY
+            echo "3. Review the specific changeset mentioned in the error" >> $GITHUB_STEP_SUMMARY
+            echo "4. Test the SQL manually via Cloud SQL proxy" >> $GITHUB_STEP_SUMMARY
+            echo "5. Check CloudSQL instance is running and accessible" >> $GITHUB_STEP_SUMMARY
+            echo "6. Verify database user has sufficient permissions" >> $GITHUB_STEP_SUMMARY
+          else
+            if [ "${{ steps.lb_update.outcome }}" == "success" ]; then
+              echo "- **Result**: Deployment successful" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Deployment Details:" >> $GITHUB_STEP_SUMMARY
+              echo "All changesets were applied successfully to CloudSQL instance." >> $GITHUB_STEP_SUMMARY
+              echo "Database verification passed." >> $GITHUB_STEP_SUMMARY
+            elif [ "${{ steps.pending_changes.outputs.has_pending_changes }}" == "false" ]; then
+              echo "- **Result**: No changes to deploy" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "Database is up to date with the changelog." >> $GITHUB_STEP_SUMMARY
+            elif [ "${{ env.DRY_RUN_ENABLED }}" == "true" ]; then
+              echo "- **Result**: Dry run completed" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "Review the updateSQL artifact to see what would be deployed." >> $GITHUB_STEP_SUMMARY
+              echo "Set DRY_RUN_ENABLED to 'false' to execute the deployment." >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- **Result**: Deployment skipped" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "*Workflow run ID: ${{ github.run_id }}*" >> $GITHUB_STEP_SUMMARY
