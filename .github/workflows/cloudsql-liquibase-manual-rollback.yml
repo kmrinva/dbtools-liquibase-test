@@ -1,4 +1,4 @@
-name: CloudSQL Liquibase Rollback
+name: CloudSQL Liquibase Manual Rollback
 
 on:
   workflow_dispatch:
@@ -261,25 +261,34 @@ jobs:
           
           ROLLBACK_TAG_NAME="${{ env.ROLLBACK_TAG_NAME }}"
           OUTPUT_FILE="rollback_preview_${ROLLBACK_TAG_NAME}.sql"
+          ERROR_LOG="rollback_error.log"
           
           # Determine rollback command based on input priority: date > tag > count
           if [ -n "${{ env.ROLLBACK_DATE }}" ]; then
-            ROLLBACK_CMD="$LB_BASE_CMD rollbackSQL --date=\"${{ env.ROLLBACK_DATE }}\" --output-file=\"$OUTPUT_FILE\""
+            ROLLBACK_CMD="$LB_BASE_CMD rollbackSQL \"${{ env.ROLLBACK_DATE }}\" --output-file=\"$OUTPUT_FILE\""
             ROLLBACK_DESC="to date '${{ env.ROLLBACK_DATE }}'"
           elif [ -n "${{ env.ROLLBACK_TAG }}" ]; then
-            ROLLBACK_CMD="$LB_BASE_CMD rollbackSQL --tag=\"${{ env.ROLLBACK_TAG }}\" --output-file=\"$OUTPUT_FILE\""
+            ROLLBACK_CMD="$LB_BASE_CMD rollbackSQL \"${{ env.ROLLBACK_TAG }}\" --output-file=\"$OUTPUT_FILE\""
             ROLLBACK_DESC="to tag '${{ env.ROLLBACK_TAG }}'"
           else
-            ROLLBACK_CMD="$LB_BASE_CMD rollbackSQL --count=${{ env.ROLLBACK_COUNT }} --output-file=\"$OUTPUT_FILE\""
+            ROLLBACK_CMD="$LB_BASE_CMD rollbackCountSQL ${{ env.ROLLBACK_COUNT }} --output-file=\"$OUTPUT_FILE\""
             ROLLBACK_DESC="${{ env.ROLLBACK_COUNT }} changeset(s)"
           fi
           
           echo "Generating rollback SQL for $ROLLBACK_DESC..."
           
-          if ! ROLLBACK_SQL_OUTPUT=$(eval "$ROLLBACK_CMD" 2>&1); then
+          # Execute command and capture output to file instead of variable
+          set +e
+          eval "$ROLLBACK_CMD" > "$ERROR_LOG" 2>&1
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ ERROR: Failed to generate rollback SQL" >> $GITHUB_STEP_SUMMARY
-            echo "FAILURE_STEP=Rollback SQL generation" >> "$GITHUB_ENV"
-            echo "FAILURE_DETAILS=Failed to generate rollback SQL: $ROLLBACK_SQL_OUTPUT" >> "$GITHUB_ENV"
+            echo "Exit code: $EXIT_CODE" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat "$ERROR_LOG" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
           
@@ -315,27 +324,34 @@ jobs:
         run: |
           echo "## Executing Rollback" >> $GITHUB_STEP_SUMMARY
           
+          ERROR_LOG="rollback_execution_error.log"
+          
           # Determine rollback command based on input priority: date > tag > count
           if [ -n "${{ env.ROLLBACK_DATE }}" ]; then
-            ROLLBACK_CMD="$LB_BASE_CMD rollback --date=\"${{ env.ROLLBACK_DATE }}\""
+            ROLLBACK_CMD="$LB_BASE_CMD rollback \"${{ env.ROLLBACK_DATE }}\""
             ROLLBACK_DESC="to date '${{ env.ROLLBACK_DATE }}'"
           elif [ -n "${{ env.ROLLBACK_TAG }}" ]; then
-            ROLLBACK_CMD="$LB_BASE_CMD rollback --tag=\"${{ env.ROLLBACK_TAG }}\""
+            ROLLBACK_CMD="$LB_BASE_CMD rollback \"${{ env.ROLLBACK_TAG }}\""
             ROLLBACK_DESC="to tag '${{ env.ROLLBACK_TAG }}'"
           else
-            ROLLBACK_CMD="$LB_BASE_CMD rollback --count=${{ env.ROLLBACK_COUNT }}"
+            ROLLBACK_CMD="$LB_BASE_CMD rollbackCount ${{ env.ROLLBACK_COUNT }}"
             ROLLBACK_DESC="${{ env.ROLLBACK_COUNT }} changeset(s)"
           fi
           
           echo "⚙️ Executing rollback $ROLLBACK_DESC..."
           
-          if ! ROLLBACK_OUTPUT=$(eval "$ROLLBACK_CMD" 2>&1); then
+          # Execute command and capture output to file
+          set +e
+          eval "$ROLLBACK_CMD" > "$ERROR_LOG" 2>&1
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ **ROLLBACK FAILED**" >> $GITHUB_STEP_SUMMARY
-            echo "FAILURE_STEP=Rollback execution" >> "$GITHUB_ENV"
-            echo "FAILURE_DETAILS=Rollback failed for $ROLLBACK_DESC" >> "$GITHUB_ENV"
-            echo "ROLLBACK_ERROR<<EOF" >> "$GITHUB_ENV"
-            echo "$ROLLBACK_OUTPUT" >> "$GITHUB_ENV"
-            echo "EOF" >> "$GITHUB_ENV"
+            echo "Exit code: $EXIT_CODE" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat "$ERROR_LOG" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
           
@@ -344,7 +360,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Rollback Output:" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "$ROLLBACK_OUTPUT" >> $GITHUB_STEP_SUMMARY
+          cat "$ERROR_LOG" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Post-rollback verification
@@ -352,16 +368,25 @@ jobs:
         run: |
           echo "## Post-Rollback Verification" >> $GITHUB_STEP_SUMMARY
           
-          if ! FINAL_STATUS=$(eval "$LB_BASE_CMD status --verbose" 2>&1); then
+          STATUS_LOG="post_rollback_status.log"
+          
+          # Get status and save to file
+          set +e
+          eval "$LB_BASE_CMD status --verbose" > "$STATUS_LOG" 2>&1
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ]; then
             echo "⚠️ **WARNING**: Post-rollback status check failed" >> $GITHUB_STEP_SUMMARY
-            echo "FAILURE_STEP=Post-rollback verification" >> "$GITHUB_ENV"
-            echo "FAILURE_DETAILS=Status check failed after rollback" >> "$GITHUB_ENV"
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat "$STATUS_LOG" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
           
           echo "✅ Database status verified after rollback" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "$FINAL_STATUS" >> $GITHUB_STEP_SUMMARY
+          cat "$STATUS_LOG" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           
           # Verify database connectivity
@@ -381,18 +406,27 @@ jobs:
           echo "## Emergency Recovery" >> $GITHUB_STEP_SUMMARY
           echo "⚠️ Rollback failed - attempting to restore to safety tag: ${{ steps.safety_tag.outputs.tag_name }}" >> $GITHUB_STEP_SUMMARY
           
-          if ! RECOVERY_OUTPUT=$(eval "$LB_BASE_CMD rollback --tag=\"${{ steps.safety_tag.outputs.tag_name }}\"" 2>&1); then
+          RECOVERY_LOG="emergency_recovery.log"
+          
+          # Attempt recovery
+          set +e
+          eval "$LB_BASE_CMD rollback \"${{ steps.safety_tag.outputs.tag_name }}\"" > "$RECOVERY_LOG" 2>&1
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ]; then
             echo "🚨 **CRITICAL**: Emergency recovery failed!" >> $GITHUB_STEP_SUMMARY
             echo "**MANUAL INTERVENTION REQUIRED**" >> $GITHUB_STEP_SUMMARY
             echo "Safety tag: ${{ steps.safety_tag.outputs.tag_name }}" >> $GITHUB_STEP_SUMMARY
-            echo "FAILURE_STEP=Critical: Emergency recovery failed" >> "$GITHUB_ENV"
-            echo "FAILURE_DETAILS=Unable to restore database to safety tag" >> "$GITHUB_ENV"
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat "$RECOVERY_LOG" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
           
           echo "✅ Emergency recovery successful - restored to safety tag" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "$RECOVERY_OUTPUT" >> $GITHUB_STEP_SUMMARY
+          cat "$RECOVERY_LOG" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Release Liquibase locks
@@ -428,29 +462,18 @@ jobs:
           echo "- **CloudSQL Instance**: ${{ env.PROJECT_ID }}:${{ env.CLOUDSQL_INSTANCE }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Database**: ${{ env.CLOUDSQL_DATABASE }}" >> $GITHUB_STEP_SUMMARY
           
-          # Display failure details if any step failed
-          if [ -n "${FAILURE_STEP:-}" ]; then
+          # Check for any step failures
+          if [ "${{ job.status }}" == "failure" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "## ❌ Rollback Failed" >> $GITHUB_STEP_SUMMARY
-            echo "- **Failed Step**: ${{ env.FAILURE_STEP }}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Failure Details**: ${{ env.FAILURE_DETAILS }}" >> $GITHUB_STEP_SUMMARY
-            
-            if [ -n "${ROLLBACK_ERROR:-}" ]; then
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "### Error Details:" >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              echo "${{ env.ROLLBACK_ERROR }}" >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-            fi
-            
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "### 🔧 Recovery Options:" >> $GITHUB_STEP_SUMMARY
             echo "1. **Download rollback SQL artifact** from this workflow run for manual execution" >> $GITHUB_STEP_SUMMARY
             echo "2. **Use safety tag** '${{ steps.safety_tag.outputs.tag_name }}' for manual recovery:" >> $GITHUB_STEP_SUMMARY
-            echo "   \`liquibase rollback --tag=${{ steps.safety_tag.outputs.tag_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "   \`liquibase rollback ${{ steps.safety_tag.outputs.tag_name }}\`" >> $GITHUB_STEP_SUMMARY
             echo "3. **Review CloudSQL logs** in GCP Console for additional context" >> $GITHUB_STEP_SUMMARY
             echo "4. **Connect to database** directly to inspect state:" >> $GITHUB_STEP_SUMMARY
-            echo "   \`gcloud sql connect ${{ env.CLOUDSQL_INSTANCE }} --user=${{ env.CLOUDSQL_USER }} --database=${{ env.CLOUDSQL_DATABASE }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "   \`gcloud sql connect poc-dbtools --user=${{ env.CLOUDSQL_USER }} --database=${{ env.CLOUDSQL_DATABASE }}\`" >> $GITHUB_STEP_SUMMARY
           else
             if [ "${{ env.DRY_RUN }}" == "true" ]; then
               echo "" >> $GITHUB_STEP_SUMMARY
